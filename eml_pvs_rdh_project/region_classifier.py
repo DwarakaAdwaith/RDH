@@ -1,103 +1,49 @@
 """
 Enhanced Multi-Level Pixel Value Splitting RDH (EML-PVS-RDH)
-Core pixel decomposition module for hierarchical three-level splitting
+Region classifier for intelligent image region analysis
 """
 
 import numpy as np
 from typing import Tuple, Optional
 import logging
+from scipy.ndimage import generic_filter, gaussian_filter, sobel
 
 logger = logging.getLogger(__name__)
 
-class PixelDecomposition:
+class RegionClassifier:
     """
-    Hierarchical three-level pixel decomposition for enhanced RDH
+    Intelligent region classifier for adaptive embedding strategies
     
-    Splits 8-bit pixels into:
-    - H (Hundreds place): Most significant, high distortion impact
-    - M (Tens place): Medium significance, moderate distortion  
-    - L (Units place): Least significant, minimal distortion
+    Classifies image regions into:
+    - SMOOTH (0): Low variance, high correlation - use all channels (H, M, L)
+    - EDGE (1): High gradient, medium variance - use M and L channels
+    - TEXTURE (2): High variance, low correlation - use L channel only
     """
     
-    def __init__(self):
-        """Initialize pixel decomposition with validation"""
-        self._validate_pixel_range()
-    
-    def _validate_pixel_range(self):
-        """Validate that 8-bit pixel range [0-255] works with decomposition"""
-        test_pixels = [0, 127, 255]
-        for pixel in test_pixels:
-            h, m, l = self._decompose_single_pixel(pixel)
-            reconstructed = self._reconstruct_single_pixel(h, m, l)
-            if reconstructed != pixel:
-                raise ValueError(f"Decomposition validation failed for pixel {pixel}")
-        logger.debug("Pixel decomposition validation passed")
-    
-    def _decompose_single_pixel(self, pixel: int) -> Tuple[int, int, int]:
+    def __init__(self, smooth_threshold: float = 100.0, edge_threshold: float = 400.0, window_size: int = 5):
         """
-        Decompose single pixel into H, M, L components
+        Initialize region classifier
         
         Args:
-            pixel (int): 8-bit pixel value [0-255]
-            
-        Returns:
-            Tuple[int, int, int]: (H, M, L) components
-            
-        Mathematical formulation:
-            H(p,q) = ⌊I(p,q)/100⌋     (range: 0-2)
-            M(p,q) = ⌊(I(p,q) mod 100)/10⌋  (range: 0-9)
-            L(p,q) = I(p,q) mod 10     (range: 0-9)
+            smooth_threshold (float): Variance threshold for smooth regions
+            edge_threshold (float): Variance threshold for edge regions
+            window_size (int): Window size for local analysis
         """
-        if not (0 <= pixel <= 255):
-            raise ValueError(f"Pixel value {pixel} out of range [0-255]")
-            
-        h = pixel // 100          # Hundreds place: 0, 1, 2
-        remainder = pixel % 100   # 0-99
-        m = remainder // 10       # Tens place: 0-9
-        l = remainder % 10        # Units place: 0-9
+        self.smooth_threshold = smooth_threshold
+        self.edge_threshold = edge_threshold
+        self.window_size = window_size
         
-        return h, m, l
+        logger.info(f"Initialized RegionClassifier: smooth_th={smooth_threshold}, edge_th={edge_threshold}, window={window_size}")
     
-    def _reconstruct_single_pixel(self, h: int, m: int, l: int) -> int:
+    def classify_regions(self, image: np.ndarray) -> np.ndarray:
         """
-        Reconstruct pixel from H, M, L components
+        Classify image regions based on local statistics
         
         Args:
-            h (int): Hundreds component [0-2]
-            m (int): Tens component [0-9]
-            l (int): Units component [0-9]
+            image (np.ndarray): Input grayscale image
             
         Returns:
-            int: Reconstructed pixel value
-            
-        Mathematical formulation:
-            I(p,q) = 100×H(p,q) + 10×M(p,q) + L(p,q)
-        """
-        # Validate component ranges
-        if not (0 <= h <= 2):
-            raise ValueError(f"H component {h} out of range [0-2]")
-        if not (0 <= m <= 9):
-            raise ValueError(f"M component {m} out of range [0-9]")
-        if not (0 <= l <= 9):
-            raise ValueError(f"L component {l} out of range [0-9]")
-            
-        pixel = 100 * h + 10 * m + l
-        
-        # Additional validation
-        if not (0 <= pixel <= 255):
-            raise ValueError(f"Reconstructed pixel {pixel} out of valid range")
-            
-        return pixel
-    
-    def decompose_image(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Decompose entire image into H, M, L channel matrices
-        
-        Args:
-            image (np.ndarray): Input grayscale image [0-255]
-            
-        Returns:
-            Tuple[np.ndarray, np.ndarray, np.ndarray]: (H, M, L) channel matrices
+            np.ndarray: Region map (0=smooth, 1=edge, 2=texture)
         """
         if image.dtype != np.uint8:
             raise ValueError("Input image must be uint8 type")
@@ -106,203 +52,366 @@ class PixelDecomposition:
             raise ValueError("Input must be grayscale (2D) image")
         
         height, width = image.shape
+        region_map = np.zeros((height, width), dtype=np.uint8)
         
-        # Initialize output arrays with appropriate data types
-        H = np.zeros((height, width), dtype=np.uint8)  # Range: 0-2
-        M = np.zeros((height, width), dtype=np.uint8)  # Range: 0-9  
-        L = np.zeros((height, width), dtype=np.uint8)  # Range: 0-9
+        # Calculate local variance
+        local_variance = self._calculate_local_variance(image)
         
-        # Vectorized decomposition for efficiency
-        H = image // 100
-        remainder = image % 100
-        M = remainder // 10
-        L = remainder % 10
+        # Calculate gradient magnitude
+        gradient_magnitude = self._calculate_gradient_magnitude(image)
         
-        logger.info(f"Decomposed image of size {image.shape}")
-        logger.debug(f"H channel range: [{H.min()}, {H.max()}]")
-        logger.debug(f"M channel range: [{M.min()}, {M.max()}]")
-        logger.debug(f"L channel range: [{L.min()}, {L.max()}]")
+        # Calculate local correlation
+        local_correlation = self._calculate_local_correlation(image)
         
-        return H, M, L
+        # Classify regions based on combined criteria
+        for i in range(height):
+            for j in range(width):
+                variance = local_variance[i, j]
+                gradient = gradient_magnitude[i, j]
+                correlation = local_correlation[i, j]
+                
+                if variance < self.smooth_threshold and correlation > 0.8:
+                    # Smooth region: low variance, high correlation
+                    region_map[i, j] = 0  # SMOOTH
+                elif gradient > 50 or (variance < self.edge_threshold and correlation > 0.5):
+                    # Edge region: high gradient or medium variance with good correlation
+                    region_map[i, j] = 1  # EDGE
+                else:
+                    # Texture region: high variance, low correlation
+                    region_map[i, j] = 2  # TEXTURE
+        
+        # Post-processing: smooth region map to reduce noise
+        region_map = self._smooth_region_map(region_map)
+        
+        # Log region statistics
+        self._log_region_statistics(region_map)
+        
+        return region_map
     
-    def reconstruct_image(self, H: np.ndarray, M: np.ndarray, L: np.ndarray) -> np.ndarray:
+    def _calculate_local_variance(self, image: np.ndarray) -> np.ndarray:
+        """Calculate local variance using sliding window"""
+        def variance_filter(values):
+            return np.var(values)
+        
+        # Apply variance filter with padding
+        local_variance = generic_filter(
+            image.astype(np.float32),
+            variance_filter,
+            size=self.window_size,
+            mode='reflect'
+        )
+        
+        return local_variance
+    
+    def _calculate_gradient_magnitude(self, image: np.ndarray) -> np.ndarray:
+        """Calculate gradient magnitude using Sobel operators"""
+        # Calculate gradients in x and y directions
+        grad_x = sobel(image.astype(np.float32), axis=1)
+        grad_y = sobel(image.astype(np.float32), axis=0)
+        
+        # Calculate gradient magnitude
+        gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        
+        return gradient_magnitude
+    
+    def _calculate_local_correlation(self, image: np.ndarray) -> np.ndarray:
+        """Calculate local correlation coefficient"""
+        height, width = image.shape
+        correlation_map = np.zeros((height, width), dtype=np.float32)
+        
+        # Half window size
+        half_win = self.window_size // 2
+        
+        for i in range(half_win, height - half_win):
+            for j in range(half_win, width - half_win):
+                # Extract local window
+                window = image[i-half_win:i+half_win+1, j-half_win:j+half_win+1].astype(np.float32)
+                
+                # Calculate correlation between adjacent pixels
+                corr_h = self._pixel_correlation(window[:, :-1], window[:, 1:])  # Horizontal
+                corr_v = self._pixel_correlation(window[:-1, :], window[1:, :])  # Vertical
+                
+                # Average correlation
+                correlation_map[i, j] = (corr_h + corr_v) / 2
+        
+        # Fill borders with nearest values
+        correlation_map = self._fill_borders(correlation_map, half_win)
+        
+        return correlation_map
+    
+    def _pixel_correlation(self, arr1: np.ndarray, arr2: np.ndarray) -> float:
+        """Calculate correlation coefficient between two arrays"""
+        if arr1.size == 0 or arr2.size == 0:
+            return 0.0
+        
+        # Flatten arrays
+        x = arr1.flatten()
+        y = arr2.flatten()
+        
+        # Calculate correlation coefficient
+        if np.std(x) == 0 or np.std(y) == 0:
+            return 0.0
+        
+        correlation = np.corrcoef(x, y)[0, 1]
+        
+        # Handle NaN values
+        if np.isnan(correlation):
+            return 0.0
+        
+        return float(correlation)
+    
+    def _fill_borders(self, array: np.ndarray, border_size: int) -> np.ndarray:
+        """Fill border regions with nearest valid values"""
+        height, width = array.shape
+        
+        # Top border
+        for i in range(border_size):
+            array[i, :] = array[border_size, :]
+        
+        # Bottom border
+        for i in range(height - border_size, height):
+            array[i, :] = array[height - border_size - 1, :]
+        
+        # Left border
+        for j in range(border_size):
+            array[:, j] = array[:, border_size]
+        
+        # Right border
+        for j in range(width - border_size, width):
+            array[:, j] = array[:, width - border_size - 1]
+        
+        return array
+    
+    def _smooth_region_map(self, region_map: np.ndarray) -> np.ndarray:
+        """Apply smoothing to reduce noise in region classification"""
+        # Apply median filter to reduce isolated pixels
+        def median_filter_func(values):
+            return np.median(values)
+        
+        smoothed = generic_filter(
+            region_map.astype(np.float32),
+            median_filter_func,
+            size=3,
+            mode='nearest'
+        ).astype(np.uint8)
+        
+        return smoothed
+    
+    def _log_region_statistics(self, region_map: np.ndarray):
+        """Log statistics about region classification"""
+        unique, counts = np.unique(region_map, return_counts=True)
+        total_pixels = region_map.size
+        
+        region_names = {0: 'SMOOTH', 1: 'EDGE', 2: 'TEXTURE'}
+        
+        logger.info("Region classification statistics:")
+        for region_type, count in zip(unique, counts):
+            percentage = (count / total_pixels) * 100
+            name = region_names.get(region_type, f'UNKNOWN_{region_type}')
+            logger.info(f"  {name}: {count} pixels ({percentage:.1f}%)")
+    
+    def get_region_embedding_capacity(self, region_map: np.ndarray, H: np.ndarray, M: np.ndarray, L: np.ndarray) -> dict:
         """
-        Reconstruct image from H, M, L channel matrices
+        Estimate embedding capacity for each region type
         
         Args:
-            H (np.ndarray): Hundreds channel matrix
-            M (np.ndarray): Tens channel matrix  
-            L (np.ndarray): Units channel matrix
+            region_map (np.ndarray): Region classification map
+            H, M, L (np.ndarray): Decomposed image channels
             
         Returns:
-            np.ndarray: Reconstructed grayscale image
+            dict: Capacity estimates by region type
         """
-        # Validate input shapes match
-        if not (H.shape == M.shape == L.shape):
-            raise ValueError("All channel matrices must have same shape")
-        
-        # Validate channel value ranges
-        if not (H.min() >= 0 and H.max() <= 2):
-            raise ValueError(f"H channel values out of range [0-2]: [{H.min()}, {H.max()}]")
-        if not (M.min() >= 0 and M.max() <= 9):
-            raise ValueError(f"M channel values out of range [0-9]: [{M.min()}, {M.max()}]")
-        if not (L.min() >= 0 and L.max() <= 9):
-            raise ValueError(f"L channel values out of range [0-9]: [{L.min()}, {L.max()}]")
-        
-        # Reconstruct using vectorized operations
-        reconstructed = (100 * H + 10 * M + L).astype(np.uint8)
-        
-        # Validate final image range
-        if not (reconstructed.min() >= 0 and reconstructed.max() <= 255):
-            raise ValueError(f"Reconstructed image out of range [0-255]: [{reconstructed.min()}, {reconstructed.max()}]")
-        
-        logger.info(f"Reconstructed image of size {reconstructed.shape}")
-        logger.debug(f"Pixel value range: [{reconstructed.min()}, {reconstructed.max()}]")
-        
-        return reconstructed
-    
-    def analyze_channel_statistics(self, H: np.ndarray, M: np.ndarray, L: np.ndarray) -> dict:
-        """
-        Analyze statistical properties of each channel for optimization
-        
-        Args:
-            H, M, L (np.ndarray): Channel matrices
-            
-        Returns:
-            dict: Statistical analysis results
-        """
-        stats = {
-            'H_channel': {
-                'mean': float(H.mean()),
-                'std': float(H.std()),
-                'entropy': self._calculate_entropy(H),
-                'unique_values': len(np.unique(H)),
-                'range': [int(H.min()), int(H.max())]
-            },
-            'M_channel': {
-                'mean': float(M.mean()),
-                'std': float(M.std()),
-                'entropy': self._calculate_entropy(M),
-                'unique_values': len(np.unique(M)),
-                'range': [int(M.min()), int(M.max())]
-            },
-            'L_channel': {
-                'mean': float(L.mean()),
-                'std': float(L.std()),
-                'entropy': self._calculate_entropy(L),
-                'unique_values': len(np.unique(L)),
-                'range': [int(L.min()), int(L.max())]
-            }
+        capacity_estimates = {
+            'SMOOTH': {'pixels': 0, 'estimated_capacity': 0, 'channels_used': ['H', 'M', 'L']},
+            'EDGE': {'pixels': 0, 'estimated_capacity': 0, 'channels_used': ['M', 'L']},
+            'TEXTURE': {'pixels': 0, 'estimated_capacity': 0, 'channels_used': ['L']}
         }
         
-        # Calculate embedding potential for each channel
-        stats['embedding_potential'] = {
-            'H_pairs': self._count_similar_pairs(H),
-            'M_pairs': self._count_similar_pairs(M), 
-            'L_predictable': self._count_predictable_pixels(L)
+        # Count pixels by region type
+        smooth_mask = (region_map == 0)
+        edge_mask = (region_map == 1)
+        texture_mask = (region_map == 2)
+        
+        capacity_estimates['SMOOTH']['pixels'] = np.sum(smooth_mask)
+        capacity_estimates['EDGE']['pixels'] = np.sum(edge_mask)
+        capacity_estimates['TEXTURE']['pixels'] = np.sum(texture_mask)
+        
+        # Estimate capacity for each region type
+        # Smooth regions: can use all channels effectively (high capacity)
+        smooth_capacity = self._estimate_smooth_capacity(H, M, L, smooth_mask)
+        capacity_estimates['SMOOTH']['estimated_capacity'] = smooth_capacity
+        
+        # Edge regions: use M and L channels (medium capacity)
+        edge_capacity = self._estimate_edge_capacity(M, L, edge_mask)
+        capacity_estimates['EDGE']['estimated_capacity'] = edge_capacity
+        
+        # Texture regions: L channel only (low capacity)
+        texture_capacity = self._estimate_texture_capacity(L, texture_mask)
+        capacity_estimates['TEXTURE']['estimated_capacity'] = texture_capacity
+        
+        # Calculate total capacity
+        total_capacity = smooth_capacity + edge_capacity + texture_capacity
+        total_pixels = region_map.size
+        
+        capacity_estimates['TOTAL'] = {
+            'estimated_capacity_bits': total_capacity,
+            'estimated_capacity_bpp': total_capacity / total_pixels if total_pixels > 0 else 0
         }
         
-        return stats
+        return capacity_estimates
     
-    def _calculate_entropy(self, channel: np.ndarray) -> float:
-        """Calculate Shannon entropy for a channel"""
-        unique, counts = np.unique(channel, return_counts=True)
-        probabilities = counts / counts.sum()
-        entropy = -np.sum(probabilities * np.log2(probabilities + 1e-10))
-        return float(entropy)
+    def _estimate_smooth_capacity(self, H: np.ndarray, M: np.ndarray, L: np.ndarray, mask: np.ndarray) -> int:
+        """Estimate capacity for smooth regions using all channels"""
+        if not np.any(mask):
+            return 0
+        
+        # Count similar adjacent pairs in each channel within smooth regions
+        h_pairs = self._count_masked_similar_pairs(H, mask)
+        m_pairs = self._count_masked_similar_pairs(M, mask)
+        l_predictable = self._count_masked_predictable_pixels(L, mask)
+        
+        # Smooth regions can utilize multiple channels effectively
+        estimated_capacity = int(h_pairs * 0.3 + m_pairs * 0.5 + l_predictable * 0.8)
+        
+        return estimated_capacity
     
-    def _count_similar_pairs(self, channel: np.ndarray) -> int:
-        """Count adjacent pairs with identical values"""
-        # Horizontal pairs
-        h_pairs = np.sum(channel[:, :-1] == channel[:, 1:])
-        # Vertical pairs  
-        v_pairs = np.sum(channel[:-1, :] == channel[1:, :])
-        return int(h_pairs + v_pairs)
+    def _estimate_edge_capacity(self, M: np.ndarray, L: np.ndarray, mask: np.ndarray) -> int:
+        """Estimate capacity for edge regions using M and L channels"""
+        if not np.any(mask):
+            return 0
+        
+        # Edge regions: use M and L channels with edge-preserving techniques
+        m_pairs = self._count_masked_similar_pairs(M, mask)
+        l_predictable = self._count_masked_predictable_pixels(L, mask)
+        
+        estimated_capacity = int(m_pairs * 0.3 + l_predictable * 0.6)
+        
+        return estimated_capacity
     
-    def _count_predictable_pixels(self, channel: np.ndarray) -> int:
-        """Count pixels that are highly predictable"""
+    def _estimate_texture_capacity(self, L: np.ndarray, mask: np.ndarray) -> int:
+        """Estimate capacity for texture regions using L channel only"""
+        if not np.any(mask):
+            return 0
+        
+        # Texture regions: L channel only with advanced prediction
+        l_predictable = self._count_masked_predictable_pixels(L, mask)
+        
+        estimated_capacity = int(l_predictable * 0.4)  # Lower capacity due to complexity
+        
+        return estimated_capacity
+    
+    def _count_masked_similar_pairs(self, channel: np.ndarray, mask: np.ndarray) -> int:
+        """Count similar adjacent pairs within masked region"""
         height, width = channel.shape
-        predictable = 0
+        count = 0
+        
+        # Horizontal pairs
+        for i in range(height):
+            for j in range(width - 1):
+                if mask[i, j] and mask[i, j + 1]:
+                    if channel[i, j] == channel[i, j + 1]:
+                        count += 1
+        
+        # Vertical pairs
+        for i in range(height - 1):
+            for j in range(width):
+                if mask[i, j] and mask[i + 1, j]:
+                    if channel[i, j] == channel[i + 1, j]:
+                        count += 1
+        
+        return count
+    
+    def _count_masked_predictable_pixels(self, channel: np.ndarray, mask: np.ndarray) -> int:
+        """Count predictable pixels within masked region"""
+        height, width = channel.shape
+        count = 0
         
         for i in range(1, height):
             for j in range(1, width):
-                # Simple predictor: average of left and top neighbors
-                predicted = (int(channel[i, j-1]) + int(channel[i-1, j])) // 2
-                if abs(int(channel[i, j]) - predicted) <= 1:
-                    predictable += 1
-                    
-        return predictable
+                if mask[i, j] and mask[i-1, j] and mask[i, j-1]:
+                    # Simple predictor: average of left and top neighbors
+                    predicted = (int(channel[i, j-1]) + int(channel[i-1, j])) // 2
+                    if abs(int(channel[i, j]) - predicted) <= 1:
+                        count += 1
+        
+        return count
     
-    def get_channel_capacity_estimate(self, image: np.ndarray) -> dict:
+    def get_adaptive_thresholds(self, region_map: np.ndarray, H: np.ndarray, M: np.ndarray, L: np.ndarray) -> dict:
         """
-        Estimate embedding capacity for each channel
+        Calculate adaptive thresholds for each region type
         
         Args:
-            image (np.ndarray): Input grayscale image
+            region_map (np.ndarray): Region classification map
+            H, M, L (np.ndarray): Decomposed image channels
             
         Returns:
-            dict: Capacity estimates for each channel
+            dict: Adaptive thresholds for each region
         """
-        H, M, L = self.decompose_image(image)
-        stats = self.analyze_channel_statistics(H, M, L)
-        
-        total_pixels = image.size
-        
-        # Estimate capacity based on statistical properties
-        capacity_estimates = {
-            'H_channel': {
-                'similar_pairs': stats['embedding_potential']['H_pairs'],
-                'estimated_capacity_bpp': stats['embedding_potential']['H_pairs'] / total_pixels,
-                'distortion_impact': 'HIGH',  # ±100 pixel change
-                'recommendation': 'Use sparingly for critical data'
-            },
-            'M_channel': {
-                'similar_pairs': stats['embedding_potential']['M_pairs'], 
-                'estimated_capacity_bpp': stats['embedding_potential']['M_pairs'] / total_pixels,
-                'distortion_impact': 'MEDIUM',  # ±10 pixel change
-                'recommendation': 'Good for moderate capacity needs'
-            },
-            'L_channel': {
-                'predictable_pixels': stats['embedding_potential']['L_predictable'],
-                'estimated_capacity_bpp': stats['embedding_potential']['L_predictable'] / total_pixels,
-                'distortion_impact': 'LOW',  # ±1 pixel change
-                'recommendation': 'Primary embedding channel'
-            },
-            'total_estimated_capacity': (
-                stats['embedding_potential']['H_pairs'] +
-                stats['embedding_potential']['M_pairs'] +
-                stats['embedding_potential']['L_predictable']
-            ) / total_pixels
+        thresholds = {
+            'SMOOTH': {'L_threshold': 1.0, 'M_threshold': 1.5, 'H_threshold': 0.0},
+            'EDGE': {'L_threshold': 1.5, 'M_threshold': 2.0, 'H_threshold': 0.0},
+            'TEXTURE': {'L_threshold': 2.0, 'M_threshold': 3.0, 'H_threshold': 0.0}
         }
         
-        logger.info(f"Total estimated capacity: {capacity_estimates['total_estimated_capacity']:.4f} bpp")
+        # Calculate region-specific statistics
+        for region_type in [0, 1, 2]:  # SMOOTH, EDGE, TEXTURE
+            mask = (region_map == region_type)
+            if np.any(mask):
+                # Calculate local variance for this region
+                region_variance = np.var(L[mask])
+                
+                # Adapt thresholds based on local characteristics
+                if region_type == 0:  # SMOOTH
+                    thresholds['SMOOTH']['L_threshold'] = max(0.5, min(1.5, region_variance * 0.1))
+                elif region_type == 1:  # EDGE
+                    thresholds['EDGE']['L_threshold'] = max(1.0, min(2.0, region_variance * 0.15))
+                else:  # TEXTURE
+                    thresholds['TEXTURE']['L_threshold'] = max(1.5, min(3.0, region_variance * 0.2))
         
-        return capacity_estimates
+        logger.info(f"Adaptive thresholds calculated: {thresholds}")
+        return thresholds
 
 # Example usage and testing
 if __name__ == "__main__":
     # Configure logging
     logging.basicConfig(level=logging.INFO)
     
-    # Create test image
-    test_image = np.random.randint(0, 256, (128, 128), dtype=np.uint8)
+    # Create test image with different regions
+    test_image = np.zeros((128, 128), dtype=np.uint8)
     
-    # Initialize decomposer
+    # Smooth region (top-left)
+    test_image[:64, :64] = 150 + np.random.normal(0, 5, (64, 64)).astype(int)
+    test_image[:64, :64] = np.clip(test_image[:64, :64], 0, 255).astype(np.uint8)
+    
+    # Edge region (top-right) - create vertical edges
+    for i in range(64):
+        for j in range(64, 128):
+            if (j - 64) % 10 < 5:
+                test_image[i, j] = 100
+            else:
+                test_image[i, j] = 200
+    
+    # Texture region (bottom half)
+    test_image[64:, :] = np.random.randint(50, 200, (64, 128), dtype=np.uint8)
+    
+    # Initialize classifier
+    classifier = RegionClassifier(smooth_threshold=100.0, edge_threshold=400.0)
+    
+    # Classify regions
+    region_map = classifier.classify_regions(test_image)
+    
+    print(f"Region map shape: {region_map.shape}")
+    print(f"Region types found: {np.unique(region_map)}")
+    
+    # Test with decomposed channels (dummy decomposition for testing)
+    from pixel_decomposition import PixelDecomposition
     decomposer = PixelDecomposition()
-    
-    # Decompose image
     H, M, L = decomposer.decompose_image(test_image)
     
-    # Reconstruct and verify
-    reconstructed = decomposer.reconstruct_image(H, M, L)
+    # Get capacity estimates
+    capacity_estimates = classifier.get_region_embedding_capacity(region_map, H, M, L)
+    print(f"Total estimated capacity: {capacity_estimates['TOTAL']['estimated_capacity_bpp']:.4f} bpp")
     
-    print(f"Perfect reconstruction: {np.array_equal(test_image, reconstructed)}")
-    
-    # Analyze capacity
-    capacity = decomposer.get_channel_capacity_estimate(test_image)
-    print(f"Estimated total capacity: {capacity['total_estimated_capacity']:.4f} bpp")
-    
-    # Channel statistics
-    stats = decomposer.analyze_channel_statistics(H, M, L)
-    for channel in ['H_channel', 'M_channel', 'L_channel']:
-        print(f"{channel}: entropy={stats[channel]['entropy']:.3f}, unique={stats[channel]['unique_values']}")
+    # Get adaptive thresholds
+    adaptive_thresholds = classifier.get_adaptive_thresholds(region_map, H, M, L)
+    print(f"Adaptive thresholds: {adaptive_thresholds}")
